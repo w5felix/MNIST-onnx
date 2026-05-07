@@ -15,7 +15,7 @@ const panelToggle = document.getElementById('panelToggle');
 let drawing = false;
 let last = null;
 let ortSession = null; // ONNX Runtime session if available
-let useServerFallback = true;
+let useServerFallback = false;
 let brushRadius = 12; // will be set on resize
 
 function sizeSquareArea() {
@@ -397,25 +397,29 @@ function showPixelationOverlay(preview28) {
 async function tryInitOnnx() {
   if (typeof ort === 'undefined') return false;
   try {
-    // Try to load ONNX model from static folder
-    const modelUrl = '/static/mnist_cnn.onnx';
-    // Quick existence check
-    const head = await fetch(modelUrl, { method: 'HEAD' });
-    if (!head.ok) throw new Error('ONNX model not found');
+    // Build a robust URL relative to the current page (works on GitHub Pages subpaths)
+    const modelUrl = new URL('mnist_cnn.onnx', window.location.href).toString();
 
-    ort.env.wasm.numThreads = 1; // MNIST is tiny
-    ort.env.wasm.simd = true;
+    // Configure ONNX Runtime Web for static hosting without COOP/COEP
+    const coi = Boolean(window.crossOriginIsolated);
+    // Avoid using threads (requires SharedArrayBuffer and COOP/COEP on static hosts like GitHub Pages)
+    ort.env.wasm.numThreads = 1;
+    // SIMD may not be available without COI on some setups; disable if not isolated for safety
+    ort.env.wasm.simd = coi;
 
-    ortSession = await ort.InferenceSession.create(modelUrl, {
-      executionProviders: ['wasm']
-    });
+    // Fetch the model bytes explicitly to avoid mime/path issues
+    const resp = await fetch(modelUrl, { cache: 'no-store' });
+    if (!resp.ok) throw new Error(`Failed to fetch model at ${modelUrl} (HTTP ${resp.status})`);
+    const buf = await resp.arrayBuffer();
+
+    ortSession = await ort.InferenceSession.create(buf, { executionProviders: ['wasm'] });
     useServerFallback = false;
     statusEl.textContent = 'ONNX Runtime (WebAssembly) ready';
     return true;
   } catch (e) {
-    console.warn('ONNX init failed, will use server fallback:', e);
-    statusEl.textContent = 'Using server for inference (start Flask)';
-    useServerFallback = true;
+    console.warn('ONNX init failed:', e);
+    statusEl.textContent = 'Failed to initialize ONNX in browser';
+    useServerFallback = false;
     return false;
   }
 }
@@ -436,30 +440,17 @@ async function predictLocal() {
   return { prediction: pred, probs, preview };
 }
 
-async function predictServer() {
-  // Send full-resolution canvas snapshot; server will run the full preprocessing pipeline
-  const dataUrl = canvas.toDataURL('image/png');
-  const res = await fetch('/predict', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: dataUrl })
-  });
-  const json = await res.json();
-  if (!res.ok) throw new Error(json.error || 'Request failed');
-  return json;
-}
 
 predictBtn.addEventListener('click', async () => {
   try {
-    statusEl.textContent = useServerFallback ? 'Predicting on server…' : 'Predicting in browser…';
-    let out, preview;
-    if (useServerFallback) {
-      // Compute local preview to show exactly what will be fed (same preprocessing as server)
-      const loc = preprocessTo28x28();
-      preview = loc.preview;
-      out = await predictServer();
-    } else {
-      out = await predictLocal();
-      preview = out.preview;
+    if (!ortSession) {
+      statusEl.textContent = 'Initializing ONNX…';
+      const ok = await tryInitOnnx();
+      if (!ok || !ortSession) throw new Error('ONNX not initialized');
     }
+    statusEl.textContent = 'Predicting in browser…';
+    const out = await predictLocal();
+    const preview = out.preview;
     predictionEl.textContent = String(out.prediction);
     probsEl.textContent = JSON.stringify(out.probs, null, 2);
     statusEl.textContent = 'Done';
