@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Draw a Digit - MNIST Demo</title>
+  <style>
+    :root {
+      --bg: #0b0b0f;
+      --panel: #14151a;
+      --accent: #6ea8fe;
+      --text: #e8e8f0;
+      --muted: #a0a3ad;
+      --border: #20222a;
+      --glass: rgba(255,255,255,0.06);
+      --glass-strong: rgba(255,255,255,0.12);
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    #stage {
+      position: fixed; inset: 0; overflow: hidden;
+      display: grid; grid-template-rows: auto 1fr; gap: 12px;
+    }
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 16px; border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0));
+      backdrop-filter: blur(6px);
+    }
+    header .title { font-weight: 600; letter-spacing: 0.2px; }
+    #canvasWrap { position: relative; height: 100%; }
+    /* Centered square draw area with stacked canvases */
+    #drawArea { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 80vmin; height: 80vmin; max-width: 100%; max-height: 100%; }
+    #drawArea canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+    #canvas { background: #000; touch-action: none; cursor: crosshair; z-index: 1; }
+    #grid { pointer-events: none; z-index: 2; }
+    #fx { pointer-events: none; z-index: 3; opacity: 0; transition: opacity 250ms ease; }
+
+    /* Controls with glossy glass buttons */
+    .controls {
+      position: fixed; left: 16px; bottom: 16px; display: flex; gap: 10px; z-index: 10;
+      background: rgba(20,21,26,0.45); border: 1px solid var(--border); padding: 10px; border-radius: 14px; backdrop-filter: blur(10px);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+    }
+    .controls button {
+      position: relative; appearance: none; border: 1px solid var(--glass-strong);
+      padding: 12px 16px; border-radius: 12px; cursor: pointer; font-weight: 700; letter-spacing: 0.2px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.25), rgba(255,255,255,0.0)) /* glossy top */,
+        linear-gradient(180deg, rgba(110,168,254,0.35), rgba(110,168,254,0.18)) /* tint */,
+        rgba(255,255,255,0.03);
+      color: #071021;
+      backdrop-filter: blur(8px) saturate(120%);
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,0.35),
+        0 6px 18px rgba(110,168,254,0.28),
+        0 1px 0 rgba(255,255,255,0.15);
+      transition: transform 120ms ease, box-shadow 200ms ease, background 200ms ease;
+    }
+    .controls button.secondary {
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.22), rgba(255,255,255,0.0)),
+        linear-gradient(180deg, rgba(80,90,110,0.35), rgba(80,90,110,0.18)),
+        rgba(255,255,255,0.03);
+      color: var(--text);
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,0.28),
+        0 6px 18px rgba(0,0,0,0.45),
+        0 1px 0 rgba(255,255,255,0.1);
+    }
+    .controls button:hover { transform: translateY(-1px); box-shadow: inset 0 1px 0 rgba(255,255,255,0.4), 0 10px 24px rgba(110,168,254,0.35), 0 1px 0 rgba(255,255,255,0.2); }
+    .controls button:active { transform: translateY(0) scale(0.98); }
+
+    /* Prediction panel */
+    #panel {
+      position: fixed; right: 16px; bottom: 16px; width: min(360px, 90vw);
+      background: rgba(20,21,26,0.55); border: 1px solid var(--border); border-radius: 14px; padding: 12px; backdrop-filter: blur(10px);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+      transition: width 160ms ease, padding 160ms ease, transform 160ms ease;
+    }
+    #panel .panel-header { display: flex; align-items: center; gap: 10px; }
+    #panel .panel-header .label { margin-right: 2px; }
+    #panel .panel-header .spacer { flex: 1; }
+    #panel .panel-toggle {
+      appearance: none; border: 1px solid var(--glass-strong); border-radius: 10px; width: 36px; height: 32px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.18), rgba(255,255,255,0.0)), rgba(255,255,255,0.03);
+      color: var(--text); cursor: pointer; display: grid; place-items: center;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.25);
+    }
+    #panel .panel-toggle:hover { filter: brightness(1.08); }
+    #panel .panel-toggle:active { transform: scale(0.97); }
+
+    #panel .pred { font-size: 56px; font-weight: 800; line-height: 1; }
+    #panel .details { margin-top: 10px; }
+
+    /* Collapsed (minimal) */
+    #panel.collapsed { width: auto; min-width: 140px; padding: 8px 10px; }
+    #panel.collapsed .pred {
+      font-size: 22px; font-weight: 800; padding: 4px 10px; border-radius: 10px;
+      background: var(--glass); border: 1px solid var(--glass-strong);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.2);
+    }
+    #panel.collapsed .details { display: none; }
+    #panel.collapsed .panel-header .label { display: none; }
+    #panel.collapsed .panel-header .spacer { display: none; }
+
+    .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+    .probs { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12px; white-space: pre; color: #bcd; }
+    .status { color: var(--muted); font-size: 12px; }
+
+    @media (max-width: 600px) {
+      #panel { right: 12px; bottom: 12px; }
+      .controls { left: 12px; bottom: 12px; }
+      .controls button { padding: 10px 14px; border-radius: 10px; }
+    }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+</head>
+<body>
+  <div id="stage">
+    <header>
+      <div class="title">MNIST Digit Classifier</div>
+      <div class="status" id="status">Loading…</div>
+    </header>
+    <div id="canvasWrap">
+      <div id="drawArea">
+        <canvas id="canvas"></canvas>
+        <canvas id="grid"></canvas>
+        <canvas id="fx"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <button id="predict">Predict</button>
+    <button id="clear" class="secondary">Clear</button>
+  </div>
+
+  <div id="panel" class="collapsed" aria-live="polite">
+    <div class="panel-header">
+      <div class="label">Prediction</div>
+      <div class="spacer"></div>
+      <div id="prediction" class="pred">–</div>
+      <button id="panelToggle" class="panel-toggle" aria-expanded="false" aria-controls="panelDetails" title="Expand">▸</button>
+    </div>
+    <div id="panelDetails" class="details">
+      <div class="label">Probabilities</div>
+      <div id="probs" class="probs">[ ]</div>
+    </div>
+  </div>
+
+  <script src="/static/script.js"></script>
+</body>
+</html>
