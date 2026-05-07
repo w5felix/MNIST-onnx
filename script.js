@@ -396,21 +396,75 @@ function showPixelationOverlay(preview28) {
 
 async function tryInitOnnx() {
   if (typeof ort === 'undefined') return false;
-  try {
-    // Build a robust URL relative to the current page (works on GitHub Pages subpaths)
-    const modelUrl = new URL('mnist_cnn.onnx', window.location.href).toString();
 
+  // Helper to detect text/HTML/LFS instead of a real ONNX binary
+  function looksLikeTextOrHtml(buf, contentType) {
+    const ct = (contentType || '').toLowerCase();
+    if (ct.includes('text') || ct.includes('html') || ct.includes('xml')) return true;
+    const bytes = new Uint8Array(buf.slice(0, Math.min(buf.byteLength, 256)));
+    let ascii = 0;
+    for (let i = 0; i < bytes.length; i++) {
+      const b = bytes[i];
+      if (b === 9 || b === 10 || b === 13 || (b >= 32 && b <= 126)) ascii++;
+    }
+    const ratio = ascii / Math.max(1, bytes.length);
+    const head = new TextDecoder().decode(bytes);
+    if (/^\s*<!doctype html/i.test(head) || /^\s*<html/i.test(head)) return true;
+    if (/^version\s+https?:\/\/git-lfs/i.test(head)) return true;
+    // Consider it text if majority printable
+    return ratio > 0.8;
+  }
+
+  async function fetchModelBytesWithFallbacks() {
+    const tried = [];
+
+    // 1) Primary: relative to the current page (supports subpaths)
+    const primary = new URL('mnist_cnn.onnx', window.location.href).toString();
+    const urls = [primary];
+
+    // 2) If on GitHub Pages, add jsDelivr fallbacks from repo
+    const host = window.location.hostname;
+    if (host.endsWith('github.io')) {
+      // owner.github.io/repo[/...]
+      const pathParts = window.location.pathname.split('/').filter(Boolean);
+      const owner = host.split('.')[0];
+      const repo = pathParts.length > 0 ? pathParts[0] : '';
+      if (owner && repo) {
+        const branches = ['gh-pages', 'main', 'master'];
+        for (const br of branches) {
+          urls.push(`https://cdn.jsdelivr.net/gh/${owner}/${repo}@${br}/mnist_cnn.onnx`);
+        }
+      }
+    }
+
+    let lastErr = null;
+    for (const url of urls) {
+      try {
+        const resp = await fetch(url, { cache: 'no-store' });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const buf = await resp.arrayBuffer();
+        const ct = resp.headers.get('content-type') || '';
+        if (looksLikeTextOrHtml(buf, ct)) {
+          const head = new TextDecoder().decode(new Uint8Array(buf.slice(0, 256)));
+          throw new Error(`Model URL returned text/HTML instead of binary. First bytes: ${head.substring(0, 80)}...`);
+        }
+        return { buf, url };
+      } catch (e) {
+        tried.push(`${url} → ${e.message}`);
+        lastErr = e;
+      }
+    }
+    const details = tried.join('\n');
+    throw new Error(`Unable to fetch a valid ONNX model. Tried URLs:\n${details}`);
+  }
+
+  try {
     // Configure ONNX Runtime Web for static hosting without COOP/COEP
     const coi = Boolean(window.crossOriginIsolated);
-    // Avoid using threads (requires SharedArrayBuffer and COOP/COEP on static hosts like GitHub Pages)
-    ort.env.wasm.numThreads = 1;
-    // SIMD may not be available without COI on some setups; disable if not isolated for safety
-    ort.env.wasm.simd = coi;
+    ort.env.wasm.numThreads = 1; // avoid SAB requirement on static hosts
+    ort.env.wasm.simd = coi;     // use SIMD only when COI-enabled
 
-    // Fetch the model bytes explicitly to avoid mime/path issues
-    const resp = await fetch(modelUrl, { cache: 'no-store' });
-    if (!resp.ok) throw new Error(`Failed to fetch model at ${modelUrl} (HTTP ${resp.status})`);
-    const buf = await resp.arrayBuffer();
+    const { buf, url: usedUrl } = await fetchModelBytesWithFallbacks();
 
     ortSession = await ort.InferenceSession.create(buf, { executionProviders: ['wasm'] });
     useServerFallback = false;
@@ -418,7 +472,7 @@ async function tryInitOnnx() {
     return true;
   } catch (e) {
     console.warn('ONNX init failed:', e);
-    statusEl.textContent = 'Failed to initialize ONNX in browser';
+    statusEl.textContent = 'Failed to initialize ONNX in browser: ' + (e && e.message ? e.message : e);
     useServerFallback = false;
     return false;
   }
