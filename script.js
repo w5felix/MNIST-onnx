@@ -4,6 +4,8 @@ const fxCanvas = document.getElementById('fx');
 const ctx = canvas.getContext('2d');
 const gridCtx = gridCanvas.getContext('2d');
 const fxCtx = fxCanvas.getContext('2d');
+const drawHint = document.getElementById('drawHint');
+const HINT_KEY = 'mn_seen_draw_hint';
 const predictBtn = document.getElementById('predict');
 const clearBtn = document.getElementById('clear');
 const predictionEl = document.getElementById('prediction');
@@ -159,6 +161,12 @@ function stamp(x, y) {
 
 function startDraw(e) {
   drawing = true;
+  // Hide the onboarding hint forever on first interaction
+  if (drawHint && !drawHint.classList.contains('hidden')) {
+    drawHint.classList.add('hidden');
+    drawHint.setAttribute('aria-hidden', 'true');
+    try { localStorage.setItem(HINT_KEY, '1'); } catch {}
+  }
   last = getPos(e);
   stamp(last.x, last.y);
 }
@@ -517,8 +525,22 @@ predictBtn.addEventListener('click', async () => {
   }
 });
 
+function initDrawHint() {
+  if (!drawHint) return;
+  let seen = false;
+  try { seen = localStorage.getItem(HINT_KEY) === '1'; } catch {}
+  if (seen) {
+    drawHint.classList.add('hidden');
+    drawHint.setAttribute('aria-hidden', 'true');
+  } else {
+    drawHint.classList.remove('hidden');
+    drawHint.setAttribute('aria-hidden', 'false');
+  }
+}
+
 (async function main() {
   resizeAll();
   applyPanelStateForViewport();
+  initDrawHint();
   await tryInitOnnx();
 })();
